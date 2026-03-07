@@ -1,5 +1,6 @@
 const startBtn = document.getElementById("startBtn");
 const stopBtn = document.getElementById("stopBtn");
+const calibrateBtn = document.getElementById("calibrateBtn");
 const statusEl = document.getElementById("status");
 const sensitivityEl = document.getElementById("sensitivity");
 const sensitivityValueEl = document.getElementById("sensitivityValue");
@@ -58,6 +59,7 @@ startBtn.addEventListener("click", async () => {
     } else {
       setStatus("Eye tracking active");
       stopBtn.disabled = false;
+      calibrateBtn.disabled = false;
     }
   } catch (err) {
     const message =
@@ -76,6 +78,28 @@ stopBtn.addEventListener("click", async () => {
   } catch {}
   setStatus("Stopped");
   startBtn.disabled = false;
+  calibrateBtn.disabled = true;
+});
+
+calibrateBtn.addEventListener("click", async () => {
+  calibrateBtn.disabled = true;
+  setStatus("Calibrating center...");
+
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "calibrate-center" });
+    if (response?.ok) {
+      setStatus("Center calibrated");
+    } else {
+      setStatus("Error: " + (response?.error || "Calibration failed"));
+    }
+  } catch (err) {
+    setStatus("Error: " + err.message);
+  } finally {
+    // Keep enabled while tracking so user can recalibrate anytime.
+    chrome.runtime.sendMessage({ type: "get-status" }, (response) => {
+      calibrateBtn.disabled = !response?.tracking;
+    });
+  }
 });
 
 // Sync UI with current state when popup opens
@@ -86,6 +110,7 @@ chrome.runtime.sendMessage({ type: "get-status" }, (response) => {
   if (response.tracking) {
     startBtn.disabled = true;
     stopBtn.disabled = false;
+    calibrateBtn.disabled = false;
     setStatus(response.statusMessage || "Eye tracking active");
   }
 

@@ -13,11 +13,36 @@
   let smoothX = cursorX;
   let smoothY = cursorY;
   let lastBlinkTime = 0;
+  let biasX = 0;
+  let biasY = 0;
+  let lastHorizontal = 0;
+  let lastVertical = 0;
 
   // Settings (updated from popup via service worker)
   let sensitivity = 2.0;
   let smoothingFactor = 0.1;
   const BLINK_COOLDOWN_MS = 600;
+  const MAX_DYNAMIC_SMOOTHING = 0.32;
+  const SPEED_FOR_MAX_SMOOTHING_X = 140;
+  const SPEED_FOR_MAX_SMOOTHING_Y = 80;
+  const AXIS_X = {
+    range: 0.32,
+    deadzone: 0.08,
+    responseExponent: 1.35,
+    gain: 1.0,
+    biasLearnRate: 0.015,
+    biasLearnThreshold: 0.2,
+    biasMax: 0.12
+  };
+  const AXIS_Y = {
+    range: 0.22,
+    deadzone: 0.03,
+    responseExponent: 1.1,
+    gain: 1.35,
+    biasLearnRate: 0.006,
+    biasLearnThreshold: 0.1,
+    biasMax: 0.08
+  };
 
   // ─── Cursor Overlay ───
 
@@ -98,17 +123,77 @@
   // horizontal/vertical from blendshapes are roughly -0.3 to +0.3.
   // Sensitivity scales this range to cover the viewport.
 
+  function clamp(v, min, max) {
+    return Math.max(min, Math.min(max, v));
+  }
+
+  function applyDeadzone(v, deadzone) {
+    const abs = Math.abs(v);
+    if (abs <= deadzone) return 0;
+    return Math.sign(v) * ((abs - deadzone) / (1 - deadzone));
+  }
+
+  function shapeResponse(v, exponent) {
+    return Math.sign(v) * Math.pow(Math.abs(v), exponent);
+  }
+
+  function learnBias(horizontal, vertical) {
+    // Learn neutral gaze center only when gaze is near center to avoid drift.
+    if (Math.abs(horizontal - biasX) < AXIS_X.biasLearnThreshold) {
+      biasX = clamp(
+        biasX + (horizontal - biasX) * AXIS_X.biasLearnRate,
+        -AXIS_X.biasMax,
+        AXIS_X.biasMax
+      );
+    }
+    if (Math.abs(vertical - biasY) < AXIS_Y.biasLearnThreshold) {
+      biasY = clamp(
+        biasY + (vertical - biasY) * AXIS_Y.biasLearnRate,
+        -AXIS_Y.biasMax,
+        AXIS_Y.biasMax
+      );
+    }
+  }
+
+  function mapAxis(raw, bias, axisConfig) {
+    const corrected = raw - bias;
+    let normalized = clamp(corrected / axisConfig.range, -1, 1);
+    normalized = applyDeadzone(normalized, axisConfig.deadzone);
+    normalized = shapeResponse(normalized, axisConfig.responseExponent);
+    normalized *= axisConfig.gain;
+    normalized = clamp(normalized, -1, 1);
+    return normalized;
+  }
+
   function updateGaze(horizontal, vertical) {
-    const rawX = (0.5 + horizontal * sensitivity) * window.innerWidth;
-    const rawY = (0.5 + vertical * sensitivity) * window.innerHeight;
+    const mappedX = mapAxis(horizontal, biasX, AXIS_X);
+    const mappedY = mapAxis(vertical, biasY, AXIS_Y);
+
+    const rawX = (0.5 + mappedX * 0.5 * sensitivity) * window.innerWidth;
+    const rawY = (0.5 + mappedY * 0.5 * sensitivity) * window.innerHeight;
 
     // Clamp to viewport
-    const clampedX = Math.max(0, Math.min(window.innerWidth, rawX));
-    const clampedY = Math.max(0, Math.min(window.innerHeight, rawY));
+    const clampedX = clamp(rawX, 0, window.innerWidth);
+    const clampedY = clamp(rawY, 0, window.innerHeight);
 
-    // Exponential moving average smoothing
-    smoothX += (clampedX - smoothX) * smoothingFactor;
-    smoothY += (clampedY - smoothY) * smoothingFactor;
+    // Adaptive smoothing: stable when fixating, faster when moving gaze.
+    const dx = clampedX - smoothX;
+    const dy = clampedY - smoothY;
+    const dynamicX = clamp(Math.abs(dx) / SPEED_FOR_MAX_SMOOTHING_X, 0, 1);
+    const dynamicY = clamp(Math.abs(dy) / SPEED_FOR_MAX_SMOOTHING_Y, 0, 1);
+    const alphaX = clamp(
+      smoothingFactor + (MAX_DYNAMIC_SMOOTHING - smoothingFactor) * dynamicX,
+      smoothingFactor,
+      MAX_DYNAMIC_SMOOTHING
+    );
+    const alphaY = clamp(
+      smoothingFactor + (MAX_DYNAMIC_SMOOTHING - smoothingFactor) * dynamicY,
+      smoothingFactor,
+      MAX_DYNAMIC_SMOOTHING
+    );
+
+    smoothX += dx * alphaX;
+    smoothY += dy * alphaY;
 
     cursorX = smoothX;
     cursorY = smoothY;
@@ -142,6 +227,36 @@
 
     // Fallback: return the original element
     return el;
+  }
+
+  function findClickableNear(x, y, radius = 60) {
+    const points = [
+      [0, 0], [radius, 0], [-radius, 0], [0, radius], [0, -radius],
+      [radius * 0.7, radius * 0.7], [radius * 0.7, -radius * 0.7],
+      [-radius * 0.7, radius * 0.7], [-radius * 0.7, -radius * 0.7]
+    ];
+
+    let best = null;
+    let bestDist = Infinity;
+
+    for (const [ox, oy] of points) {
+      const px = clamp(x + ox, 0, window.innerWidth - 1);
+      const py = clamp(y + oy, 0, window.innerHeight - 1);
+      const candidate = findClickableElement(px, py);
+      if (!candidate) continue;
+
+      const rect = candidate.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const dist = Math.hypot(cx - x, cy - y);
+
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = candidate;
+      }
+    }
+
+    return bestDist <= radius * 1.4 ? best : null;
   }
 
   function simulateClick(el) {
@@ -188,7 +303,7 @@
       }, 200);
     }
 
-    const target = findClickableElement(cursorX, cursorY);
+    const target = findClickableNear(cursorX, cursorY, 70) || findClickableElement(cursorX, cursorY);
     if (target) {
       simulateClick(target);
       setStatusText("Clicked!");
@@ -196,6 +311,15 @@
         if (isActive) setStatusText("Tracking");
       }, 800);
     }
+  }
+
+  function calibrateCenter() {
+    biasX = clamp(lastHorizontal, -AXIS_X.biasMax, AXIS_X.biasMax);
+    biasY = clamp(lastVertical, -AXIS_Y.biasMax, AXIS_Y.biasMax);
+    setStatusText("Center calibrated");
+    setTimeout(() => {
+      if (isActive) setStatusText("Tracking");
+    }, 800);
   }
 
   // ─── Start / Stop ───
@@ -214,6 +338,8 @@
     smoothY = window.innerHeight / 2;
     cursorX = smoothX;
     cursorY = smoothY;
+    biasX = 0;
+    biasY = 0;
 
     createCursor();
     createStatusBadge();
@@ -258,6 +384,10 @@
           }
           break;
 
+        case "calibrate-center":
+          calibrateCenter();
+          break;
+
         case "status-update":
           setStatusText(msg.message || msg.status || "");
           break;
@@ -271,8 +401,11 @@
           }
 
           setStatusText("Tracking");
+          lastHorizontal = msg.horizontal;
+          lastVertical = msg.vertical;
           // Keep cursor stable while eyes are closed to avoid blink-induced jumps.
           if (!msg.eyesClosed) {
+            learnBias(msg.horizontal, msg.vertical);
             updateGaze(msg.horizontal, msg.vertical);
           }
 

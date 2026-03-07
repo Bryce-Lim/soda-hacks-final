@@ -64,6 +64,15 @@ h1 {
   background: #e57373;
 }
 
+.btn-calibrate {
+  background: #ffd166;
+  color: #1a1a2e;
+}
+
+.btn-calibrate:hover:not(:disabled) {
+  background: #ffe29a;
+}
+
 .btn:disabled {
   background: #333;
   color: #666;

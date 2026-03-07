@@ -5,6 +5,7 @@ let state = {
   tabId: null,
   tabPort: null,      // port to content script
   gazePort: null,     // port from offscreen document
+  reconnecting: false,
   statusMessage: "Ready",
   settings: {
     sensitivity: 2.0,
@@ -33,6 +34,63 @@ async function ensureOffscreenDocument() {
 async function closeOffscreenDocument() {
   if (await hasOffscreenDocument()) {
     await chrome.offscreen.closeDocument();
+  }
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForContentScript(tabId, attempts = 12, intervalMs = 250) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const pong = await chrome.tabs.sendMessage(tabId, { type: "ping" });
+      if (pong?.ok) return true;
+    } catch {}
+    await delay(intervalMs);
+  }
+  return false;
+}
+
+async function connectTabPort(tabId) {
+  const ready = await waitForContentScript(tabId);
+  if (!ready) return { error: "Cannot connect to this page." };
+
+  let port;
+  try {
+    port = chrome.tabs.connect(tabId, { name: "gaze-stream" });
+  } catch (err) {
+    return { error: "Failed to connect to page: " + err.message };
+  }
+
+  state.tabPort = port;
+  try {
+    port.postMessage({
+      type: "start-overlay",
+      settings: state.settings
+    });
+  } catch {}
+
+  port.onDisconnect.addListener(() => {
+    if (state.tabPort === port) {
+      state.tabPort = null;
+      if (state.tracking) {
+        state.statusMessage = "Reconnecting to page...";
+      }
+    }
+  });
+
+  return { ok: true };
+}
+
+async function reconnectTrackedTab() {
+  if (!state.tracking || !state.tabId || state.tabPort || state.reconnecting) return;
+  state.reconnecting = true;
+  state.statusMessage = "Reconnecting to page...";
+  try {
+    await connectTabPort(state.tabId);
+  } finally {
+    state.reconnecting = false;
   }
 }
 
@@ -68,34 +126,11 @@ async function startTracking(settings) {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) return { error: "No active tab found" };
 
-  // Verify content script is injected on this tab
-  try {
-    const pong = await chrome.tabs.sendMessage(tab.id, { type: "ping" });
-    if (!pong?.ok) throw new Error();
-  } catch {
-    return { error: "Cannot connect to this page. Try refreshing." };
-  }
-
   state.tabId = tab.id;
   state.settings = { ...state.settings, ...settings };
 
-  // Connect to content script via port
-  try {
-    state.tabPort = chrome.tabs.connect(tab.id, { name: "gaze-stream" });
-  } catch (err) {
-    return { error: "Failed to connect to page: " + err.message };
-  }
-
-  state.tabPort.postMessage({
-    type: "start-overlay",
-    settings: state.settings
-  });
-
-  state.tabPort.onDisconnect.addListener(() => {
-    state.tabPort = null;
-    // If tab closed while tracking, clean up
-    if (state.tracking) stopTracking();
-  });
+  const portResult = await connectTabPort(tab.id);
+  if (portResult.error) return portResult;
 
   // Create offscreen document (starts webcam + face mesh automatically)
   try {
@@ -115,6 +150,7 @@ async function startTracking(settings) {
 
 async function stopTracking() {
   state.tracking = false;
+  state.reconnecting = false;
   state.statusMessage = "Stopped";
 
   // Notify content script
@@ -131,6 +167,18 @@ async function stopTracking() {
   state.tabId = null;
   return { ok: true };
 }
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (!state.tracking || tabId !== state.tabId) return;
+  if (changeInfo.status === "complete") {
+    reconnectTrackedTab().catch(() => {});
+  }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (!state.tracking || tabId !== state.tabId) return;
+  stopTracking().catch(() => {});
+});
 
 // ─── Message Handler ───
 
@@ -169,6 +217,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       } catch {}
     }
     sendResponse({ ok: true });
+    return;
+  }
+
+  if (msg.type === "calibrate-center") {
+    if (!state.tracking || !state.tabPort) {
+      sendResponse({ error: "Tracking is not active" });
+      return;
+    }
+    try {
+      state.tabPort.postMessage({ type: "calibrate-center" });
+      sendResponse({ ok: true });
+    } catch (err) {
+      sendResponse({ error: "Failed to send calibrate command: " + err.message });
+    }
     return;
   }
 
