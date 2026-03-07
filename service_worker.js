@@ -7,8 +7,8 @@ let state = {
   gazePort: null,     // port from offscreen document
   statusMessage: "Ready",
   settings: {
-    sensitivity: 2.5,
-    smoothing: 0.15
+    sensitivity: 2.0,
+    smoothing: 0.1
   }
 };
 
@@ -175,6 +175,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // Status updates from offscreen document
   if (msg.type === "status") {
     state.statusMessage = msg.message || msg.status;
+
+    if (msg.status === "error") {
+      state.tracking = false;
+
+      // If startup failed, ensure page overlay and ports are cleaned up.
+      if (state.tabPort) {
+        try { state.tabPort.postMessage({ type: "stop-overlay" }); } catch {}
+        try { state.tabPort.disconnect(); } catch {}
+        state.tabPort = null;
+      }
+      state.gazePort = null;
+      state.tabId = null;
+
+      // Best-effort cleanup of offscreen document.
+      closeOffscreenDocument().catch(() => {});
+    }
+
     // Forward to content script for on-page badge
     if (state.tabPort) {
       try {

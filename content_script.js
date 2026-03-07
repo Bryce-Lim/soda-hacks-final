@@ -15,8 +15,8 @@
   let lastBlinkTime = 0;
 
   // Settings (updated from popup via service worker)
-  let sensitivity = 2.5;
-  let smoothingFactor = 0.15;
+  let sensitivity = 2.0;
+  let smoothingFactor = 0.1;
   const BLINK_COOLDOWN_MS = 600;
 
   // ─── Cursor Overlay ───
@@ -205,8 +205,8 @@
     isActive = true;
 
     if (settings) {
-      sensitivity = settings.sensitivity || 2.5;
-      smoothingFactor = settings.smoothing || 0.15;
+      sensitivity = settings.sensitivity || 2.0;
+      smoothingFactor = settings.smoothing || 0.1;
     }
 
     // Reset cursor to center
@@ -271,7 +271,10 @@
           }
 
           setStatusText("Tracking");
-          updateGaze(msg.horizontal, msg.vertical);
+          // Keep cursor stable while eyes are closed to avoid blink-induced jumps.
+          if (!msg.eyesClosed) {
+            updateGaze(msg.horizontal, msg.vertical);
+          }
 
           if (msg.blink) {
             handleBlink();

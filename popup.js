@@ -10,6 +10,15 @@ function setStatus(text) {
   statusEl.textContent = text;
 }
 
+async function ensureCameraPermission() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error("Camera API not available in this browser context");
+  }
+
+  const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+  stream.getTracks().forEach((t) => t.stop());
+}
+
 // Send settings changes live while tracking
 sensitivityEl.addEventListener("input", () => {
   sensitivityValueEl.textContent = sensitivityEl.value + "x";
@@ -32,6 +41,9 @@ startBtn.addEventListener("click", async () => {
   setStatus("Starting...");
 
   try {
+    setStatus("Requesting camera permission...");
+    await ensureCameraPermission();
+
     const response = await chrome.runtime.sendMessage({
       type: "start-tracking",
       settings: {
@@ -48,7 +60,11 @@ startBtn.addEventListener("click", async () => {
       stopBtn.disabled = false;
     }
   } catch (err) {
-    setStatus("Error: " + err.message);
+    const message =
+      err?.name === "NotAllowedError"
+        ? "Camera permission denied or dismissed. Allow camera and try again."
+        : "Error: " + err.message;
+    setStatus(message);
     startBtn.disabled = false;
   }
 });

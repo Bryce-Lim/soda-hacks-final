@@ -20,6 +20,32 @@ function sendStatus(status, message) {
   } catch {}
 }
 
+function formatError(err) {
+  if (!err) return "Unknown error";
+  const name = err.name || "Error";
+  const message = err.message || String(err);
+  return `${name}: ${message}`;
+}
+
+async function openCameraStream() {
+  const constraintsList = [
+    { video: { width: 640, height: 480, facingMode: "user" } },
+    { video: { facingMode: "user" } },
+    { video: true }
+  ];
+
+  let lastErr = null;
+  for (const constraints of constraintsList) {
+    try {
+      return await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+
+  throw lastErr || new DOMException("Unable to access camera", "NotReadableError");
+}
+
 // ─── Gaze Estimation from Blendshapes ───
 // Uses ARKit-compatible blendshapes from MediaPipe FaceLandmarker.
 // eyeLookIn/Out/Up/Down for each eye give us gaze direction.
@@ -66,7 +92,7 @@ function detectBlink(categories) {
     blinkDetected = true;
   }
 
-  return blinkDetected;
+  return { blinkDetected, avgBlink, eyesClosed };
 }
 
 // ─── Frame Processing Loop ───
@@ -85,14 +111,16 @@ function processFrame(video) {
 
     const categories = result.faceBlendshapes[0].categories;
     const { horizontal, vertical } = computeGaze(categories);
-    const blink = detectBlink(categories);
+    const blinkState = detectBlink(categories);
 
     port.postMessage({
       type: "gaze-data",
       faceDetected: true,
       horizontal,
       vertical,
-      blink
+      blink: blinkState.blinkDetected,
+      eyesClosed: blinkState.eyesClosed,
+      blinkScore: blinkState.avgBlink
     });
   } catch (err) {
     console.error("[EyesOnly:offscreen] Frame processing error:", err);
@@ -111,62 +139,112 @@ function scheduleNextFrame(video) {
 // ─── Initialization ───
 
 async function start() {
+  let stage = "initialization";
   try {
     sendStatus("loading", "Loading eye tracker...");
 
     // Resolve WASM fileset from local extension files
+    stage = "resolving wasm files";
     const wasmPath = chrome.runtime.getURL("lib/wasm");
     const modelPath = chrome.runtime.getURL("models/face_landmarker.task");
 
+    stage = "loading vision tasks runtime";
     const vision = await FilesetResolver.forVisionTasks(wasmPath);
 
-    faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
-      baseOptions: {
-        modelAssetPath: modelPath,
-        delegate: "GPU"
-      },
-      runningMode: "VIDEO",
-      numFaces: 1,
-      outputFaceBlendshapes: true,
-      outputFacialTransformationMatrixes: false
-    });
+    stage = "creating face landmarker";
+    // Try GPU first for lower latency, then fall back to CPU if GPU init fails.
+    try {
+      faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: modelPath,
+          delegate: "GPU"
+        },
+        runningMode: "VIDEO",
+        numFaces: 1,
+        outputFaceBlendshapes: true,
+        outputFacialTransformationMatrixes: false
+      });
+    } catch (gpuErr) {
+      console.warn("[EyesOnly:offscreen] GPU delegate unavailable, falling back to CPU:", gpuErr);
+      faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: modelPath,
+          delegate: "CPU"
+        },
+        runningMode: "VIDEO",
+        numFaces: 1,
+        outputFaceBlendshapes: true,
+        outputFacialTransformationMatrixes: false
+      });
+    }
 
     sendStatus("camera", "Opening camera...");
 
-    videoStream = await navigator.mediaDevices.getUserMedia({
-      video: { width: 640, height: 480, facingMode: "user" }
-    });
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new DOMException("getUserMedia is not available in this context", "NotSupportedError");
+    }
 
+    stage = "requesting camera stream";
+    videoStream = await openCameraStream();
+
+    stage = "starting video playback";
     const video = document.createElement("video");
+    video.autoplay = true;
+    video.muted = true;
     video.srcObject = videoStream;
     video.setAttribute("playsinline", "");
+    video.setAttribute("muted", "");
     await video.play();
 
     // Wait for video to be ready for processing
-    await new Promise((resolve) => {
-      if (video.readyState >= 2) resolve();
-      else video.addEventListener("loadeddata", resolve, { once: true });
+    stage = "waiting for video frames";
+    await new Promise((resolve, reject) => {
+      if (video.readyState >= 2) {
+        resolve();
+        return;
+      }
+
+      const timeout = setTimeout(() => {
+        reject(new DOMException("Timed out waiting for video frames", "AbortError"));
+      }, 5000);
+
+      const onReady = () => {
+        clearTimeout(timeout);
+        resolve();
+      };
+
+      video.addEventListener("loadeddata", onReady, { once: true });
     });
 
     // Connect streaming port to service worker
+    stage = "connecting gaze stream";
     port = chrome.runtime.connect({ name: "gaze-stream" });
     port.onDisconnect.addListener(() => {
       port = null;
       stop();
     });
 
+    stage = "starting frame loop";
     running = true;
     sendStatus("active", "Tracking active");
     processFrame(video);
   } catch (err) {
-    const message =
-      err.name === "NotAllowedError"
+    const name = err?.name || "";
+    const reason =
+      name === "NotAllowedError"
         ? "Camera permission denied"
-        : err.name === "NotFoundError"
+        : name === "NotFoundError"
           ? "No camera found"
-          : "Error: " + err.message;
+          : name === "NotReadableError"
+            ? "Camera is busy or blocked by another app"
+            : name === "SecurityError"
+              ? "Camera access blocked by browser or OS policy"
+              : "Startup failed";
+    const message = `${reason} during ${stage}. ${formatError(err)}`;
     sendStatus("error", message);
-    console.error("[EyesOnly:offscreen] Start failed:", err);
+    console.error(
+      `[EyesOnly:offscreen] Start failed at ${stage}: ${formatError(err)}`
+    );
   }
 }
 
