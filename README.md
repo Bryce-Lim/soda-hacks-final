@@ -19,12 +19,6 @@ We use a SOTA ML model developed in a recent research paper (https://arxiv.org/a
 
 Then you can activate the extension whenever you want!
 
-# Sightline — Eye Tracking Web Navigation
-
-Navigate the web with just your eyes. A Chrome extension where your gaze moves the cursor and a long blink triggers a click.
-
-Built as an accessibility tool for users with severe motor impairments.
-
 ## Quick Start
 
 ```bash
