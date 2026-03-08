@@ -22,33 +22,44 @@ if [ ! -f "package.json" ]; then
   npm init -y > /dev/null 2>&1
 fi
 
-# Install MediaPipe tasks-vision
-echo "Installing @mediapipe/tasks-vision..."
-npm install @mediapipe/tasks-vision
+# Install WebEyeTrack runtime
+echo "Installing webeyetrack..."
+npm install webeyetrack
 
 # Create output directories
-mkdir -p lib/wasm models
+mkdir -p lib web
 
-# Copy the vision bundle (ESM entry point)
-echo "Copying MediaPipe library files..."
-if [ -f "node_modules/@mediapipe/tasks-vision/vision_bundle.mjs" ]; then
-  cp node_modules/@mediapipe/tasks-vision/vision_bundle.mjs lib/vision_bundle.mjs
+# Copy WebEyeTrack bundle
+echo "Copying WebEyeTrack bundle..."
+if [ -f "node_modules/webeyetrack/dist/index.js" ]; then
+  cp node_modules/webeyetrack/dist/index.js lib/webeyetrack.js
 else
-  echo "ERROR: vision_bundle.mjs not found in @mediapipe/tasks-vision package."
-  echo "The package structure may have changed. Check node_modules/@mediapipe/tasks-vision/"
+  echo "ERROR: dist/index.js not found in webeyetrack package."
   exit 1
 fi
 
-# Copy all WASM files (includes SIMD and non-SIMD variants)
-cp node_modules/@mediapipe/tasks-vision/wasm/* lib/wasm/
+# Patch upstream hardcoded CDN paths to local extension assets (CSP-safe).
+node - <<'NODE'
+const fs = require("fs");
+const path = "lib/webeyetrack.js";
+let src = fs.readFileSync(path, "utf8");
+src = src.replace(
+  /https:\/\/cdn\.jsdelivr\.net\/npm\/@mediapipe\/tasks-vision@0\.10\.3\/wasm/g,
+  "/lib/wasm"
+);
+src = src.replace(
+  /https:\/\/storage\.googleapis\.com\/mediapipe-models\/face_landmarker\/face_landmarker\/float16\/1\/face_landmarker\.task/g,
+  "/models/face_landmarker.task"
+);
+fs.writeFileSync(path, src, "utf8");
+NODE
 
-echo "Library files copied to lib/"
-
-# Download face landmarker model
-echo ""
-echo "Downloading face landmarker model (~5MB)..."
-curl -L --progress-bar -o models/face_landmarker.task \
-  "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task"
+# Download WebEyeTrack model assets expected at /web/model.json
+echo "Downloading WebEyeTrack model assets..."
+curl -L --progress-bar -o web/model.json \
+  "https://raw.githubusercontent.com/RedForestAI/WebEyeTrack/main/js/examples/minimal-example/public/web/model.json"
+curl -L --progress-bar -o web/group1-shard1of1.bin \
+  "https://raw.githubusercontent.com/RedForestAI/WebEyeTrack/main/js/examples/minimal-example/public/web/group1-shard1of1.bin"
 
 echo ""
 echo "=== Setup complete! ==="

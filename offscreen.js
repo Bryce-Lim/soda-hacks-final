@@ -1,18 +1,15 @@
-import { FaceLandmarker, FilesetResolver } from "./lib/vision_bundle.mjs";
-
-// ─── State ───
-
+// State
 let running = false;
-let faceLandmarker = null;
-let videoStream = null;
+let tracker = null;
+let video = null;
+let stream = null;
 let port = null;
-
-// Blink transition detection (hysteresis)
 let eyesClosed = false;
-const BLINK_CLOSE_THRESHOLD = 0.45;
-const BLINK_OPEN_THRESHOLD = 0.25;
+let frameTimer = null;
+let canvas = null;
+let ctx = null;
 
-// ─── Status Reporting ───
+const FRAME_MS = 33;
 
 function sendStatus(status, message) {
   try {
@@ -25,6 +22,15 @@ function formatError(err) {
   const name = err.name || "Error";
   const message = err.message || String(err);
   return `${name}: ${message}`;
+}
+
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
+}
+
+function emitNoFace() {
+  if (!running || !port) return;
+  port.postMessage({ type: "gaze-data", faceDetected: false });
 }
 
 async function openCameraStream() {
@@ -42,181 +48,93 @@ async function openCameraStream() {
       lastErr = err;
     }
   }
-
   throw lastErr || new DOMException("Unable to access camera", "NotReadableError");
 }
 
-// ─── Gaze Estimation from Blendshapes ───
-// Uses ARKit-compatible blendshapes from MediaPipe FaceLandmarker.
-// eyeLookIn/Out/Up/Down for each eye give us gaze direction.
 
-function computeGaze(categories) {
-  const get = (name) => {
-    const item = categories.find((c) => c.categoryName === name);
-    return item ? item.score : 0;
-  };
-
-  // Horizontal: positive = looking right, negative = looking left
-  // "LookIn" on the left eye means looking toward nose = looking right
-  // "LookOut" on the left eye means looking toward left ear = looking left
-  const lookRight = (get("eyeLookInLeft") + get("eyeLookOutRight")) / 2;
-  const lookLeft = (get("eyeLookOutLeft") + get("eyeLookInRight")) / 2;
-  const horizontal = lookRight - lookLeft;
-
-  // Vertical: positive = looking down, negative = looking up
-  const lookDown = (get("eyeLookDownLeft") + get("eyeLookDownRight")) / 2;
-  const lookUp = (get("eyeLookUpLeft") + get("eyeLookUpRight")) / 2;
-  const vertical = lookDown - lookUp;
-
-  return { horizontal, vertical };
-}
-
-// ─── Blink Detection ───
-// Uses hysteresis to detect complete blink cycles (close then open).
-// Returns true only on the open transition after a close.
-
-function detectBlink(categories) {
-  const get = (name) => {
-    const item = categories.find((c) => c.categoryName === name);
-    return item ? item.score : 0;
-  };
-
-  const avgBlink = (get("eyeBlinkLeft") + get("eyeBlinkRight")) / 2;
-
-  let blinkDetected = false;
-
-  if (!eyesClosed && avgBlink > BLINK_CLOSE_THRESHOLD) {
-    eyesClosed = true;
-  } else if (eyesClosed && avgBlink < BLINK_OPEN_THRESHOLD) {
-    eyesClosed = false;
-    blinkDetected = true;
+function stopFrameLoop() {
+  if (frameTimer) {
+    clearTimeout(frameTimer);
+    frameTimer = null;
   }
-
-  return { blinkDetected, avgBlink, eyesClosed };
 }
 
-// ─── Frame Processing Loop ───
-
-function processFrame(video) {
-  if (!running || !faceLandmarker || !port) return;
-
+async function processFrame() {
+  if (!running || !tracker || !video || !ctx || !canvas || !port) return;
   try {
-    const result = faceLandmarker.detectForVideo(video, performance.now());
-
-    if (!result.faceBlendshapes || result.faceBlendshapes.length === 0) {
-      port.postMessage({ type: "gaze-data", faceDetected: false });
-      scheduleNextFrame(video);
+    if (video.readyState < 2 || video.videoWidth <= 0 || video.videoHeight <= 0) {
+      emitNoFace();
+      scheduleNextFrame();
       return;
     }
 
-    const categories = result.faceBlendshapes[0].categories;
-    const { horizontal, vertical } = computeGaze(categories);
-    const blinkState = detectBlink(categories);
+    if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+    }
+
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const result = await tracker.step(frame, performance.now());
+
+    if (!result || !result.facialLandmarks || result.facialLandmarks.length === 0) {
+      emitNoFace();
+      scheduleNextFrame();
+      return;
+    }
+
+    const normPog = Array.isArray(result.normPog) ? result.normPog : [0, 0];
+    const horizontal = clamp(normPog[0], -0.5, 0.5);
+    const vertical = clamp(normPog[1], -0.5, 0.5);
+
+    const nowClosed = result.gazeState === "closed";
+    let blinkDetected = false;
+    if (!eyesClosed && nowClosed) {
+      eyesClosed = true;
+    } else if (eyesClosed && !nowClosed) {
+      eyesClosed = false;
+      blinkDetected = true;
+    }
 
     port.postMessage({
       type: "gaze-data",
       faceDetected: true,
       horizontal,
       vertical,
-      blink: blinkState.blinkDetected,
-      eyesClosed: blinkState.eyesClosed,
-      blinkScore: blinkState.avgBlink
+      blink: blinkDetected,
+      eyesClosed,
+      blinkScore: nowClosed ? 1 : 0
     });
   } catch (err) {
     console.error("[EyesOnly:offscreen] Frame processing error:", err);
+    sendStatus("error", `Frame processing failed. ${formatError(err)}`);
+    stop();
+    return;
   }
 
-  scheduleNextFrame(video);
+  scheduleNextFrame();
 }
 
-function scheduleNextFrame(video) {
+function scheduleNextFrame() {
   if (!running) return;
-  // Use setTimeout instead of requestAnimationFrame because offscreen
-  // documents have no visible surface and rAF may not fire reliably.
-  setTimeout(() => processFrame(video), 33); // ~30fps
+  frameTimer = setTimeout(() => {
+    processFrame().catch((err) => {
+      sendStatus("error", `Frame loop crashed. ${formatError(err)}`);
+      stop();
+    });
+  }, FRAME_MS);
 }
-
-// ─── Initialization ───
 
 async function start() {
   let stage = "initialization";
   try {
     sendStatus("loading", "Loading eye tracker...");
 
-    // Resolve WASM fileset from local extension files
-    stage = "resolving wasm files";
-    const wasmPath = chrome.runtime.getURL("lib/wasm");
-    const modelPath = chrome.runtime.getURL("models/face_landmarker.task");
-
-    stage = "loading vision tasks runtime";
-    const vision = await FilesetResolver.forVisionTasks(wasmPath);
-
-    stage = "creating face landmarker";
-    // Try GPU first for lower latency, then fall back to CPU if GPU init fails.
-    try {
-      faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath: modelPath,
-          delegate: "GPU"
-        },
-        runningMode: "VIDEO",
-        numFaces: 1,
-        outputFaceBlendshapes: true,
-        outputFacialTransformationMatrixes: false
-      });
-    } catch (gpuErr) {
-      console.warn("[EyesOnly:offscreen] GPU delegate unavailable, falling back to CPU:", gpuErr);
-      faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath: modelPath,
-          delegate: "CPU"
-        },
-        runningMode: "VIDEO",
-        numFaces: 1,
-        outputFaceBlendshapes: true,
-        outputFacialTransformationMatrixes: false
-      });
+    stage = "checking runtime";
+    if (!window.WebEyeTrack) {
+      throw new Error("WebEyeTrack runtime not found");
     }
 
-    sendStatus("camera", "Opening camera...");
-
-    if (!navigator.mediaDevices?.getUserMedia) {
-      throw new DOMException("getUserMedia is not available in this context", "NotSupportedError");
-    }
-
-    stage = "requesting camera stream";
-    videoStream = await openCameraStream();
-
-    stage = "starting video playback";
-    const video = document.createElement("video");
-    video.autoplay = true;
-    video.muted = true;
-    video.srcObject = videoStream;
-    video.setAttribute("playsinline", "");
-    video.setAttribute("muted", "");
-    await video.play();
-
-    // Wait for video to be ready for processing
-    stage = "waiting for video frames";
-    await new Promise((resolve, reject) => {
-      if (video.readyState >= 2) {
-        resolve();
-        return;
-      }
-
-      const timeout = setTimeout(() => {
-        reject(new DOMException("Timed out waiting for video frames", "AbortError"));
-      }, 5000);
-
-      const onReady = () => {
-        clearTimeout(timeout);
-        resolve();
-      };
-
-      video.addEventListener("loadeddata", onReady, { once: true });
-    });
-
-    // Connect streaming port to service worker
     stage = "connecting gaze stream";
     port = chrome.runtime.connect({ name: "gaze-stream" });
     port.onDisconnect.addListener(() => {
@@ -224,10 +142,32 @@ async function start() {
       stop();
     });
 
-    stage = "starting frame loop";
+    stage = "opening camera";
+    stream = await openCameraStream();
+    video = document.getElementById("webcam");
+    if (!video) {
+      throw new Error("Hidden video element not found");
+    }
+    video.srcObject = stream;
+    video.muted = true;
+    video.setAttribute("playsinline", "");
+    await video.play();
+
+    stage = "initializing model";
+    tracker = new window.WebEyeTrack();
+    await tracker.initialize();
+
+    stage = "preparing frame buffer";
+    canvas = document.createElement("canvas");
+    ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) {
+      throw new Error("Could not create 2D canvas context");
+    }
+
     running = true;
+    eyesClosed = false;
     sendStatus("active", "Tracking active");
-    processFrame(video);
+    scheduleNextFrame();
   } catch (err) {
     const name = err?.name || "";
     const reason =
@@ -242,25 +182,43 @@ async function start() {
               : "Startup failed";
     const message = `${reason} during ${stage}. ${formatError(err)}`;
     sendStatus("error", message);
-    console.error(
-      `[EyesOnly:offscreen] Start failed at ${stage}: ${formatError(err)}`
-    );
+    console.error(`[EyesOnly:offscreen] Start failed at ${stage}: ${formatError(err)}`);
+    stop();
   }
 }
 
 function stop() {
   running = false;
-  if (videoStream) {
-    videoStream.getTracks().forEach((t) => t.stop());
-    videoStream = null;
+  eyesClosed = false;
+  stopFrameLoop();
+
+  if (video) {
+    try {
+      video.pause();
+    } catch {}
+    try {
+      video.srcObject = null;
+    } catch {}
   }
+  video = null;
+
+  if (stream) {
+    stream.getTracks().forEach((t) => t.stop());
+    stream = null;
+  }
+
+  tracker = null;
+  canvas = null;
+  ctx = null;
+
   if (port) {
-    try { port.disconnect(); } catch {}
+    try {
+      port.disconnect();
+    } catch {}
     port = null;
   }
 }
 
-// Listen for stop command from service worker
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "stop-camera") {
     stop();
@@ -268,5 +226,4 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 });
 
-// Auto-start when the offscreen document is created
 start();

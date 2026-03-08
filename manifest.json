@@ -3,7 +3,7 @@
   "name": "Eyes Only",
   "description": "Navigate the web with your eyes. Gaze moves the cursor, blink to click.",
   "version": "0.1.0",
-  "permissions": ["offscreen"],
+  "permissions": ["offscreen", "tabs"],
   "action": {
     "default_title": "Eyes Only - Eye Tracking Navigation",
     "default_popup": "popup.html"
@@ -17,6 +17,10 @@
       "js": ["content_script.js"],
       "run_at": "document_idle"
     }
+  ],
+  "host_permissions": [
+    "https://cdn.jsdelivr.net/*",
+    "https://storage.googleapis.com/*"
   ],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"

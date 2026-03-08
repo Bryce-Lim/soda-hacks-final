@@ -17,14 +17,24 @@
   let biasY = 0;
   let lastHorizontal = 0;
   let lastVertical = 0;
+  let verticalMin = -0.12;
+  let verticalMax = 0.12;
+  let filteredHorizontal = 0;
+  let filteredVertical = 0;
+  let hasFilteredGaze = false;
+  let easyClickMode = false;
+  let calibrationModel = null;
+  let calibrationTargetEl = null;
+  let calibrationSession = null;
 
   // Settings (updated from popup via service worker)
   let sensitivity = 2.0;
-  let smoothingFactor = 0.1;
+  let smoothingFactor = 0.06;
   const BLINK_COOLDOWN_MS = 600;
-  const MAX_DYNAMIC_SMOOTHING = 0.32;
-  const SPEED_FOR_MAX_SMOOTHING_X = 140;
-  const SPEED_FOR_MAX_SMOOTHING_Y = 80;
+  const MAX_DYNAMIC_SMOOTHING = 0.16;
+  const SPEED_FOR_MAX_SMOOTHING_X = 220;
+  const SPEED_FOR_MAX_SMOOTHING_Y = 180;
+  const INPUT_GAZE_ALPHA = 0.12;
   const AXIS_X = {
     range: 0.32,
     deadzone: 0.08,
@@ -41,8 +51,20 @@
     gain: 1.35,
     biasLearnRate: 0.006,
     biasLearnThreshold: 0.1,
-    biasMax: 0.08
+    biasMax: 0.08,
+    minRange: 0.08,
+    envelopeReturnRate: 0.0012
   };
+  const CALIBRATION_POINTS = [
+    { id: "tl", label: "Top Left", x: 0.08, y: 0.1 },
+    { id: "tr", label: "Top Right", x: 0.92, y: 0.1 },
+    { id: "bl", label: "Bottom Left", x: 0.08, y: 0.9 },
+    { id: "br", label: "Bottom Right", x: 0.92, y: 0.9 },
+    { id: "c", label: "Center", x: 0.5, y: 0.5 }
+  ];
+  const CALIBRATION_SETTLE_MS = 700;
+  const CALIBRATION_CAPTURE_MS = 1200;
+  const CALIBRATION_MIN_SAMPLES = 12;
 
   // ─── Cursor Overlay ───
 
@@ -81,6 +103,66 @@
     if (!cursorEl) return;
     cursorEl.style.left = x + "px";
     cursorEl.style.top = y + "px";
+  }
+
+  function setEasyClickMode(enabled) {
+    easyClickMode = !!enabled;
+    const styleId = "__eyes_only_easy_click_style__";
+    let styleEl = document.getElementById(styleId);
+
+    if (!easyClickMode) {
+      if (styleEl) styleEl.remove();
+      return;
+    }
+
+    if (!styleEl) {
+      styleEl = document.createElement("style");
+      styleEl.id = styleId;
+      document.documentElement.appendChild(styleEl);
+    }
+
+    styleEl.textContent = `
+      a, button, input, textarea, select, summary, [role="button"], [role="link"], [tabindex]:not([tabindex="-1"]) {
+        min-width: 56px !important;
+        min-height: 56px !important;
+        padding: 12px 16px !important;
+        font-size: max(1.05em, 16px) !important;
+        line-height: 1.35 !important;
+      }
+    `;
+  }
+
+  function createCalibrationTarget() {
+    if (calibrationTargetEl) return;
+    calibrationTargetEl = document.createElement("div");
+    calibrationTargetEl.id = "__eyes_only_calibration_target__";
+    calibrationTargetEl.style.cssText = [
+      "position: fixed",
+      "width: 22px",
+      "height: 22px",
+      "border-radius: 50%",
+      "border: 3px solid rgba(255, 255, 255, 0.95)",
+      "background: rgba(244, 67, 54, 0.9)",
+      "box-shadow: 0 0 0 8px rgba(244, 67, 54, 0.25), 0 0 18px rgba(0, 0, 0, 0.45)",
+      "transform: translate(-50%, -50%)",
+      "z-index: 2147483647",
+      "pointer-events: none"
+    ].join(";");
+    document.documentElement.appendChild(calibrationTargetEl);
+  }
+
+  function removeCalibrationTarget() {
+    if (calibrationTargetEl) {
+      calibrationTargetEl.remove();
+      calibrationTargetEl = null;
+    }
+  }
+
+  function positionCalibrationTarget(point, step, total) {
+    if (!calibrationTargetEl) return;
+    calibrationTargetEl.style.left = `${point.x * window.innerWidth}px`;
+    calibrationTargetEl.style.top = `${point.y * window.innerHeight}px`;
+    setStatusText(`Calibrating ${step}/${total}: ${point.label}`);
   }
 
   // ─── Status Badge ───
@@ -137,6 +219,16 @@
     return Math.sign(v) * Math.pow(Math.abs(v), exponent);
   }
 
+  function lerp(a, b, t) {
+    return a + (b - a) * t;
+  }
+
+  function inverseLerp(a, b, v) {
+    const d = b - a;
+    if (Math.abs(d) < 1e-6) return 0.5;
+    return (v - a) / d;
+  }
+
   function learnBias(horizontal, vertical) {
     // Learn neutral gaze center only when gaze is near center to avoid drift.
     if (Math.abs(horizontal - biasX) < AXIS_X.biasLearnThreshold) {
@@ -165,9 +257,78 @@
     return normalized;
   }
 
+  function updateVerticalEnvelope(vertical) {
+    // Track personal up/down gaze limits with slow decay so mapping self-tunes.
+    verticalMin = Math.min(verticalMin + AXIS_Y.envelopeReturnRate, vertical);
+    verticalMax = Math.max(verticalMax - AXIS_Y.envelopeReturnRate, vertical);
+  }
+
+  function mapVerticalAxis(raw) {
+    const corrected = raw - biasY;
+    const upRange = Math.max(AXIS_Y.minRange, biasY - verticalMin);
+    const downRange = Math.max(AXIS_Y.minRange, verticalMax - biasY);
+    const range = corrected < 0 ? upRange : downRange;
+
+    let normalized = clamp(corrected / range, -1, 1);
+    normalized = applyDeadzone(normalized, AXIS_Y.deadzone);
+    normalized = shapeResponse(normalized, AXIS_Y.responseExponent);
+    normalized *= AXIS_Y.gain;
+    normalized = clamp(normalized, -1, 1);
+    return normalized;
+  }
+
+  function smoothGazeInput(horizontal, vertical) {
+    if (!hasFilteredGaze) {
+      filteredHorizontal = horizontal;
+      filteredVertical = vertical;
+      hasFilteredGaze = true;
+    } else {
+      filteredHorizontal += (horizontal - filteredHorizontal) * INPUT_GAZE_ALPHA;
+      filteredVertical += (vertical - filteredVertical) * INPUT_GAZE_ALPHA;
+    }
+    return { horizontal: filteredHorizontal, vertical: filteredVertical };
+  }
+
+  function projectWithModel(horizontal, vertical, model) {
+    const { tl, tr, bl, br, offsetX, offsetY } = model;
+
+    const xTop = inverseLerp(tl.h, tr.h, horizontal);
+    const xBottom = inverseLerp(bl.h, br.h, horizontal);
+    const yLeft = inverseLerp(tl.v, bl.v, vertical);
+    const yRight = inverseLerp(tr.v, br.v, vertical);
+
+    const coarseX = clamp((xTop + xBottom) * 0.5, 0, 1);
+    const coarseY = clamp((yLeft + yRight) * 0.5, 0, 1);
+
+    const hMinAtY = lerp(tl.h, bl.h, coarseY);
+    const hMaxAtY = lerp(tr.h, br.h, coarseY);
+    const refinedX = clamp(inverseLerp(hMinAtY, hMaxAtY, horizontal), 0, 1);
+
+    const vTopAtX = lerp(tl.v, tr.v, coarseX);
+    const vBottomAtX = lerp(bl.v, br.v, coarseX);
+    const refinedY = clamp(inverseLerp(vTopAtX, vBottomAtX, vertical), 0, 1);
+
+    const x = clamp(((coarseX + refinedX) * 0.5) + offsetX, 0, 1);
+    const y = clamp(((coarseY + refinedY) * 0.5) + offsetY, 0, 1);
+
+    return {
+      mappedX: x * 2 - 1,
+      mappedY: y * 2 - 1
+    };
+  }
+
+  function mapWithCalibration(horizontal, vertical) {
+    if (!calibrationModel) return null;
+    return projectWithModel(horizontal, vertical, calibrationModel);
+  }
+
   function updateGaze(horizontal, vertical) {
-    const mappedX = mapAxis(horizontal, biasX, AXIS_X);
-    const mappedY = mapAxis(vertical, biasY, AXIS_Y);
+    const calibrated = mapWithCalibration(horizontal, vertical);
+    const mappedX = calibrated ? calibrated.mappedX : mapAxis(horizontal, biasX, AXIS_X);
+    if (!calibrated) {
+      updateVerticalEnvelope(vertical);
+    }
+    const mappedY = calibrated ? calibrated.mappedY : mapVerticalAxis(vertical);
 
     const rawX = (0.5 + mappedX * 0.5 * sensitivity) * window.innerWidth;
     const rawY = (0.5 + mappedY * 0.5 * sensitivity) * window.innerHeight;
@@ -316,10 +477,114 @@
   function calibrateCenter() {
     biasX = clamp(lastHorizontal, -AXIS_X.biasMax, AXIS_X.biasMax);
     biasY = clamp(lastVertical, -AXIS_Y.biasMax, AXIS_Y.biasMax);
+    verticalMin = biasY - 0.12;
+    verticalMax = biasY + 0.12;
     setStatusText("Center calibrated");
     setTimeout(() => {
       if (isActive) setStatusText("Tracking");
     }, 800);
+  }
+
+  function robustPointAverage(samples) {
+    if (!samples || samples.length === 0) return null;
+
+    const take = (key) => {
+      const sorted = samples.map((s) => s[key]).sort((a, b) => a - b);
+      const trim = Math.floor(sorted.length * 0.2);
+      const kept = sorted.slice(trim, sorted.length - trim);
+      const values = kept.length ? kept : sorted;
+      const sum = values.reduce((acc, v) => acc + v, 0);
+      return sum / values.length;
+    };
+
+    return { h: take("h"), v: take("v") };
+  }
+
+  function buildCalibrationModel(results) {
+    const tl = results.tl;
+    const tr = results.tr;
+    const bl = results.bl;
+    const br = results.br;
+    const c = results.c;
+    if (!tl || !tr || !bl || !br || !c) return null;
+
+    const cornerOnly = { tl, tr, bl, br, offsetX: 0, offsetY: 0 };
+    const centerMapped = projectWithModel(c.h, c.v, cornerOnly);
+    const centerX = centerMapped ? (centerMapped.mappedX + 1) * 0.5 : 0.5;
+    const centerY = centerMapped ? (centerMapped.mappedY + 1) * 0.5 : 0.5;
+
+    return {
+      tl,
+      tr,
+      bl,
+      br,
+      offsetX: clamp(0.5 - centerX, -0.2, 0.2),
+      offsetY: clamp(0.5 - centerY, -0.2, 0.2)
+    };
+  }
+
+  function wait(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function runCalibration() {
+    if (!isActive) {
+      setStatusText("Start tracking first");
+      return;
+    }
+    if (calibrationSession?.running) return;
+
+    calibrationSession = {
+      running: true,
+      collecting: false,
+      samples: [],
+      results: {}
+    };
+
+    createCalibrationTarget();
+    try {
+      for (let i = 0; i < CALIBRATION_POINTS.length; i++) {
+        if (!calibrationSession.running) throw new Error("Calibration cancelled");
+        const point = CALIBRATION_POINTS[i];
+        positionCalibrationTarget(point, i + 1, CALIBRATION_POINTS.length);
+        await wait(CALIBRATION_SETTLE_MS);
+
+        calibrationSession.samples = [];
+        calibrationSession.collecting = true;
+        await wait(CALIBRATION_CAPTURE_MS);
+        calibrationSession.collecting = false;
+
+        const avg = robustPointAverage(calibrationSession.samples);
+        if (!avg || calibrationSession.samples.length < CALIBRATION_MIN_SAMPLES) {
+          throw new Error(`Not enough stable samples at ${point.label}`);
+        }
+        calibrationSession.results[point.id] = avg;
+      }
+
+      const model = buildCalibrationModel(calibrationSession.results);
+      if (!model) {
+        throw new Error("Calibration model build failed");
+      }
+      calibrationModel = model;
+      setStatusText("5-point calibration complete");
+      setTimeout(() => {
+        if (isActive && !(calibrationSession && calibrationSession.running)) {
+          setStatusText("Tracking");
+        }
+      }, 1200);
+    } catch (err) {
+      setStatusText(`Calibration failed: ${err.message}`);
+      setTimeout(() => {
+        if (isActive) setStatusText("Tracking");
+      }, 1500);
+    } finally {
+      if (calibrationSession) {
+        calibrationSession.running = false;
+        calibrationSession.collecting = false;
+      }
+      calibrationSession = null;
+      removeCalibrationTarget();
+    }
   }
 
   // ─── Start / Stop ───
@@ -330,7 +595,10 @@
 
     if (settings) {
       sensitivity = settings.sensitivity || 2.0;
-      smoothingFactor = settings.smoothing || 0.1;
+      smoothingFactor = settings.smoothing || 0.06;
+      setEasyClickMode(!!settings.easyClickMode);
+    } else {
+      setEasyClickMode(false);
     }
 
     // Reset cursor to center
@@ -340,6 +608,9 @@
     cursorY = smoothY;
     biasX = 0;
     biasY = 0;
+    verticalMin = -0.12;
+    verticalMax = 0.12;
+    hasFilteredGaze = false;
 
     createCursor();
     createStatusBadge();
@@ -348,8 +619,11 @@
 
   function stopOverlay() {
     isActive = false;
+    calibrationSession = null;
     removeCursor();
+    removeCalibrationTarget();
     removeStatusBadge();
+    setEasyClickMode(false);
   }
 
   // ─── Message Handling ───
@@ -381,10 +655,20 @@
           if (msg.settings) {
             if (msg.settings.sensitivity != null) sensitivity = msg.settings.sensitivity;
             if (msg.settings.smoothing != null) smoothingFactor = msg.settings.smoothing;
+            if (msg.settings.easyClickMode != null) setEasyClickMode(msg.settings.easyClickMode);
           }
           break;
 
+        case "set-easy-click-mode":
+          setEasyClickMode(!!msg.enabled);
+          break;
+
+        case "run-calibration":
+          runCalibration();
+          break;
+
         case "calibrate-center":
+          // Backward-compatible quick center calibration.
           calibrateCenter();
           break;
 
@@ -400,16 +684,26 @@
             break;
           }
 
-          setStatusText("Tracking");
+          if (!(calibrationSession && calibrationSession.running)) {
+            setStatusText("Tracking");
+          }
           lastHorizontal = msg.horizontal;
           lastVertical = msg.vertical;
-          // Keep cursor stable while eyes are closed to avoid blink-induced jumps.
-          if (!msg.eyesClosed) {
-            learnBias(msg.horizontal, msg.vertical);
-            updateGaze(msg.horizontal, msg.vertical);
+
+          if (calibrationSession && calibrationSession.collecting && !msg.eyesClosed) {
+            calibrationSession.samples.push({ h: msg.horizontal, v: msg.vertical });
           }
 
-          if (msg.blink) {
+          // Keep cursor stable while eyes are closed to avoid blink-induced jumps.
+          if (!msg.eyesClosed) {
+            const filtered = smoothGazeInput(msg.horizontal, msg.vertical);
+            if (!calibrationModel) {
+              learnBias(filtered.horizontal, filtered.vertical);
+            }
+            updateGaze(filtered.horizontal, filtered.vertical);
+          }
+
+          if (msg.blink && !(calibrationSession && calibrationSession.running)) {
             handleBlink();
           }
           break;

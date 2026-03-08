@@ -1,11 +1,16 @@
 const startBtn = document.getElementById("startBtn");
 const stopBtn = document.getElementById("stopBtn");
 const calibrateBtn = document.getElementById("calibrateBtn");
+const easyClickBtn = document.getElementById("easyClickBtn");
 const statusEl = document.getElementById("status");
 const sensitivityEl = document.getElementById("sensitivity");
 const sensitivityValueEl = document.getElementById("sensitivityValue");
 const smoothingEl = document.getElementById("smoothing");
 const smoothingValueEl = document.getElementById("smoothingValue");
+
+function setEasyClickButton(enabled) {
+  easyClickBtn.textContent = enabled ? "Disable Easy Click Mode" : "Enable Easy Click Mode";
+}
 
 function setStatus(text) {
   statusEl.textContent = text;
@@ -60,6 +65,7 @@ startBtn.addEventListener("click", async () => {
       setStatus("Eye tracking active");
       stopBtn.disabled = false;
       calibrateBtn.disabled = false;
+      easyClickBtn.disabled = false;
     }
   } catch (err) {
     const message =
@@ -79,16 +85,18 @@ stopBtn.addEventListener("click", async () => {
   setStatus("Stopped");
   startBtn.disabled = false;
   calibrateBtn.disabled = true;
+  easyClickBtn.disabled = true;
+  setEasyClickButton(false);
 });
 
 calibrateBtn.addEventListener("click", async () => {
   calibrateBtn.disabled = true;
-  setStatus("Calibrating center...");
+  setStatus("Running 5-point calibration...");
 
   try {
-    const response = await chrome.runtime.sendMessage({ type: "calibrate-center" });
+    const response = await chrome.runtime.sendMessage({ type: "run-calibration" });
     if (response?.ok) {
-      setStatus("Center calibrated");
+      setStatus("Follow on-screen calibration points");
     } else {
       setStatus("Error: " + (response?.error || "Calibration failed"));
     }
@@ -98,6 +106,30 @@ calibrateBtn.addEventListener("click", async () => {
     // Keep enabled while tracking so user can recalibrate anytime.
     chrome.runtime.sendMessage({ type: "get-status" }, (response) => {
       calibrateBtn.disabled = !response?.tracking;
+      easyClickBtn.disabled = !response?.tracking;
+      setEasyClickButton(!!response?.easyClickMode);
+    });
+  }
+});
+
+easyClickBtn.addEventListener("click", async () => {
+  easyClickBtn.disabled = true;
+  setStatus("Updating Easy Click Mode...");
+
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "toggle-easy-click-mode" });
+    if (response?.ok) {
+      setEasyClickButton(!!response.enabled);
+      setStatus(response.enabled ? "Easy Click Mode enabled" : "Easy Click Mode disabled");
+    } else {
+      setStatus("Error: " + (response?.error || "Could not toggle mode"));
+    }
+  } catch (err) {
+    setStatus("Error: " + err.message);
+  } finally {
+    chrome.runtime.sendMessage({ type: "get-status" }, (response) => {
+      easyClickBtn.disabled = !response?.tracking;
+      setEasyClickButton(!!response?.easyClickMode);
     });
   }
 });
@@ -111,7 +143,10 @@ chrome.runtime.sendMessage({ type: "get-status" }, (response) => {
     startBtn.disabled = true;
     stopBtn.disabled = false;
     calibrateBtn.disabled = false;
+    easyClickBtn.disabled = false;
     setStatus(response.statusMessage || "Eye tracking active");
+  } else {
+    setEasyClickButton(false);
   }
 
   if (response.sensitivity) {
@@ -122,4 +157,5 @@ chrome.runtime.sendMessage({ type: "get-status" }, (response) => {
     smoothingEl.value = response.smoothing;
     smoothingValueEl.textContent = String(response.smoothing);
   }
+  setEasyClickButton(!!response.easyClickMode);
 });

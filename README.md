@@ -7,7 +7,7 @@ Built as an accessibility tool for users with severe motor impairments.
 ## Quick Start
 
 ```bash
-# 1. Run setup (installs MediaPipe + downloads model)
+# 1. Run setup (installs WebEyeTrack + downloads model assets)
 bash setup.sh
 
 # 2. Load in Chrome
@@ -37,7 +37,7 @@ Popup (UI)  -->  Service Worker (relay)  -->  Offscreen Document (webcam + ML)
 
 ### Components
 
-- **Offscreen Document** (`offscreen.js`): Runs the webcam and MediaPipe FaceLandmarker in a hidden document. Extracts face blendshapes at ~30fps and streams gaze direction + blink events to the service worker via a chrome port.
+- **Offscreen Document** (`offscreen.js`): Runs WebEyeTrack in a hidden document. Streams normalized point-of-gaze + blink state to the service worker via a chrome port.
 
 - **Service Worker** (`service_worker.js`): Orchestrates everything. Creates/destroys the offscreen document, connects to the content script, and relays gaze data between them.
 
@@ -47,15 +47,7 @@ Popup (UI)  -->  Service Worker (relay)  -->  Offscreen Document (webcam + ML)
 
 ### Eye Tracking Approach
 
-Uses **MediaPipe FaceLandmarker** with face blendshapes enabled. The ARKit-compatible blendshapes provide:
-
-- `eyeLookInLeft/Right`, `eyeLookOutLeft/Right` for horizontal gaze direction
-- `eyeLookUpLeft/Right`, `eyeLookDownLeft/Right` for vertical gaze direction
-- `eyeBlinkLeft`, `eyeBlinkRight` for blink detection
-
-Gaze blendshapes are mapped to screen coordinates using a sensitivity multiplier (adjustable via the popup). No explicit calibration step is needed.
-
-Blink detection uses hysteresis (separate open/close thresholds) to detect complete blink cycles and avoid false positives.
+Uses **WebEyeTrack** for webcam gaze estimation and face tracking. The offscreen pipeline emits normalized point-of-gaze (`normPog`) and eye state (`open`/`closed`), which the content script maps to screen coordinates with smoothing and calibration.
 
 ## File Structure
 
@@ -66,11 +58,11 @@ service_worker.js     Background service worker
 content_script.js     Page overlay + cursor + click handling
 offscreen.html/js     Webcam + MediaPipe processing
 setup.sh              Downloads dependencies
-lib/                  MediaPipe library files (created by setup.sh)
-  vision_bundle.mjs
-  wasm/
-models/               ML model (created by setup.sh)
-  face_landmarker.task
+lib/                  WebEyeTrack browser bundle (created by setup.sh)
+  webeyetrack.js
+web/                  WebEyeTrack model assets (created by setup.sh)
+  model.json
+  group1-shard1of1.bin
 ```
 
 ## Controls
@@ -96,5 +88,5 @@ models/               ML model (created by setup.sh)
 - Cannot work on chrome:// pages or the Chrome Web Store
 - Camera must have reasonable lighting
 - Single face only; multiple faces may cause erratic behavior
-- Blink sensitivity may need tuning per person (adjust thresholds in offscreen.js)
+- Webcam-only gaze tracking accuracy varies by camera placement and lighting
 - No drag, double-click, or right-click support

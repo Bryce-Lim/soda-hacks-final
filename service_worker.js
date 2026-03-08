@@ -6,12 +6,16 @@ let state = {
   tabPort: null,      // port to content script
   gazePort: null,     // port from offscreen document
   reconnecting: false,
+  easyClickMode: false,
+  previousZoomFactor: null,
   statusMessage: "Ready",
   settings: {
     sensitivity: 2.0,
-    smoothing: 0.1
+    smoothing: 0.06
   }
 };
+
+const EASY_CLICK_ZOOM_FACTOR = 1.5;
 
 // ─── Offscreen Document Management ───
 
@@ -67,7 +71,10 @@ async function connectTabPort(tabId) {
   try {
     port.postMessage({
       type: "start-overlay",
-      settings: state.settings
+      settings: {
+        ...state.settings,
+        easyClickMode: state.easyClickMode
+      }
     });
   } catch {}
 
@@ -89,9 +96,42 @@ async function reconnectTrackedTab() {
   state.statusMessage = "Reconnecting to page...";
   try {
     await connectTabPort(state.tabId);
+    if (state.easyClickMode) {
+      await applyEasyClickModeToTab(true);
+    }
   } finally {
     state.reconnecting = false;
   }
+}
+
+async function applyEasyClickModeToTab(enabled) {
+  if (!state.tabId) return { error: "No active tracked tab" };
+
+  if (enabled) {
+    if (state.previousZoomFactor == null) {
+      try {
+        state.previousZoomFactor = await chrome.tabs.getZoom(state.tabId);
+      } catch {
+        state.previousZoomFactor = 1;
+      }
+    }
+    await chrome.tabs.setZoom(state.tabId, EASY_CLICK_ZOOM_FACTOR);
+  } else {
+    const restoreZoom = state.previousZoomFactor == null ? 1 : state.previousZoomFactor;
+    try {
+      await chrome.tabs.setZoom(state.tabId, restoreZoom);
+    } catch {}
+    state.previousZoomFactor = null;
+  }
+
+  if (state.tabPort) {
+    try {
+      state.tabPort.postMessage({ type: "set-easy-click-mode", enabled });
+    } catch {}
+  }
+
+  state.easyClickMode = enabled;
+  return { ok: true, enabled: state.easyClickMode };
 }
 
 // ─── Port from Offscreen Document (gaze data stream) ───
@@ -149,6 +189,10 @@ async function startTracking(settings) {
 }
 
 async function stopTracking() {
+  if (state.easyClickMode) {
+    await applyEasyClickModeToTab(false);
+  }
+
   state.tracking = false;
   state.reconnecting = false;
   state.statusMessage = "Stopped";
@@ -198,6 +242,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "get-status") {
     sendResponse({
       tracking: state.tracking,
+      easyClickMode: state.easyClickMode,
       statusMessage: state.statusMessage,
       sensitivity: state.settings.sensitivity,
       smoothing: state.settings.smoothing
@@ -220,6 +265,34 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return;
   }
 
+  if (msg.type === "run-calibration") {
+    if (!state.tracking || !state.tabPort) {
+      sendResponse({ error: "Tracking is not active" });
+      return;
+    }
+    try {
+      state.tabPort.postMessage({ type: "run-calibration" });
+      sendResponse({ ok: true });
+    } catch (err) {
+      sendResponse({ error: "Failed to send calibration command: " + err.message });
+    }
+    return;
+  }
+
+  if (msg.type === "toggle-easy-click-mode") {
+    if (!state.tracking || !state.tabPort || !state.tabId) {
+      sendResponse({ error: "Tracking is not active" });
+      return;
+    }
+
+    applyEasyClickModeToTab(!state.easyClickMode)
+      .then(sendResponse)
+      .catch((err) => {
+        sendResponse({ error: "Failed to toggle Easy Click Mode: " + err.message });
+      });
+    return true;
+  }
+
   if (msg.type === "calibrate-center") {
     if (!state.tracking || !state.tabPort) {
       sendResponse({ error: "Tracking is not active" });
@@ -239,6 +312,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     state.statusMessage = msg.message || msg.status;
 
     if (msg.status === "error") {
+      if (state.easyClickMode) {
+        applyEasyClickModeToTab(false).catch(() => {});
+      }
       state.tracking = false;
 
       // If startup failed, ensure page overlay and ports are cleaned up.

@@ -73,6 +73,15 @@ h1 {
   background: #ffe29a;
 }
 
+.btn-easy {
+  background: #81c784;
+  color: #102416;
+}
+
+.btn-easy:hover:not(:disabled) {
+  background: #a5d6a7;
+}
+
 .btn:disabled {
   background: #333;
   color: #666;
