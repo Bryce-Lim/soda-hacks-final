@@ -1,11 +1,11 @@
 {
   "manifest_version": 3,
-  "name": "Eyes Only",
-  "description": "Navigate the web with your eyes. Gaze moves the cursor, blink to click.",
+  "name": "Sightline",
+  "description": "Navigate the web with just your eyes.",
   "version": "0.1.0",
   "permissions": ["offscreen", "tabs"],
   "action": {
-    "default_title": "Eyes Only - Eye Tracking Navigation",
+    "default_title": "Sightline",
     "default_popup": "popup.html"
   },
   "background": {

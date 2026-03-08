@@ -5,119 +5,81 @@
 }
 
 body {
-  width: 280px;
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-  background: #1a1a2e;
-  color: #e0e0e0;
+  width: 260px;
+  font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: #f5f5f5;
+  color: #333;
 }
 
-.container {
-  padding: 16px;
+.card {
+  padding: 20px;
+  margin: 10px;
+  background: #fff;
+  border-radius: 12px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
+  border: 2px solid transparent;
+  transition: border-color 0.2s;
 }
 
-h1 {
-  font-size: 18px;
-  color: #4fc3f7;
-  margin-bottom: 0;
+.card.active {
+  border-color: #F65009;
+}
+
+.title {
+  font-size: 20px;
+  font-weight: 700;
+  color: #F65009;
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .subtitle {
-  font-size: 11px;
-  color: #888;
-  margin-top: -8px;
+  font-size: 13px;
+  font-weight: 400;
+  color: #666;
+  margin-top: -4px;
 }
 
 .controls {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  margin-top: 6px;
 }
 
 .btn {
   padding: 10px;
-  border: none;
-  border-radius: 6px;
+  border-radius: 8px;
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background 0.15s, opacity 0.15s;
+  display: none;
 }
 
-.btn-start {
-  background: #4fc3f7;
-  color: #1a1a2e;
-}
-
-.btn-start:hover:not(:disabled) {
-  background: #81d4fa;
-}
-
-.btn-stop {
-  background: #ef5350;
-  color: white;
-}
-
-.btn-stop:hover:not(:disabled) {
-  background: #e57373;
-}
-
-.btn-calibrate {
-  background: #ffd166;
-  color: #1a1a2e;
-}
-
-.btn-calibrate:hover:not(:disabled) {
-  background: #ffe29a;
-}
-
-.btn-easy {
-  background: #81c784;
-  color: #102416;
-}
-
-.btn-easy:hover:not(:disabled) {
-  background: #a5d6a7;
-}
-
-.btn:disabled {
-  background: #333;
-  color: #666;
-  cursor: default;
-}
-
-.setting label {
+.btn.visible {
   display: block;
-  font-size: 11px;
-  color: #aaa;
-  margin-bottom: 2px;
 }
 
-.slider-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.btn-filled {
+  background: #F65009;
+  color: #fff;
+  border: 2px solid #F65009;
 }
 
-.slider-row input[type="range"] {
-  flex: 1;
-  accent-color: #4fc3f7;
+.btn-filled:hover {
+  background: #e04808;
+  border-color: #e04808;
 }
 
-.slider-row span {
-  font-size: 11px;
-  color: #4fc3f7;
-  min-width: 32px;
-  text-align: right;
+.btn-outlined {
+  background: #fff;
+  color: #F65009;
+  border: 2px solid #F65009;
 }
 
-.status {
-  font-size: 12px;
-  color: #aaa;
-  padding: 8px 12px;
-  background: #16213e;
-  border-radius: 6px;
-  text-align: center;
+.btn-outlined:hover {
+  background: #fbe9e7;
 }

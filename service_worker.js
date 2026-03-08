@@ -10,12 +10,12 @@ let state = {
   previousZoomFactor: null,
   statusMessage: "Ready",
   settings: {
-    sensitivity: 2.0,
+    sensitivity: 1.0,
     smoothing: 0.06
   }
 };
 
-const EASY_CLICK_ZOOM_FACTOR = 1.5;
+const EASY_CLICK_ZOOM_FACTOR = 1.8;
 
 // ─── Offscreen Document Management ───
 
@@ -219,9 +219,36 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   }
 });
 
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  if (!state.tracking) return;
+  if (activeInfo.tabId === state.tabId) return;
+
+  // Clean up old tab
+  if (state.tabPort) {
+    try { state.tabPort.postMessage({ type: "stop-overlay" }); } catch {}
+    try { state.tabPort.disconnect(); } catch {}
+    state.tabPort = null;
+  }
+
+  // Switch to the new tab
+  state.tabId = activeInfo.tabId;
+  try {
+    await connectTabPort(activeInfo.tabId);
+    if (state.easyClickMode) {
+      await applyEasyClickModeToTab(true);
+    }
+  } catch {}
+});
+
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (!state.tracking || tabId !== state.tabId) return;
-  stopTracking().catch(() => {});
+  // Clear the closed tab's port but keep tracking active.
+  // onActivated will reconnect to whichever tab becomes active next.
+  if (state.tabPort) {
+    try { state.tabPort.disconnect(); } catch {}
+    state.tabPort = null;
+  }
+  state.tabId = null;
 });
 
 // ─── Message Handler ───
@@ -262,20 +289,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       } catch {}
     }
     sendResponse({ ok: true });
-    return;
-  }
-
-  if (msg.type === "run-calibration") {
-    if (!state.tracking || !state.tabPort) {
-      sendResponse({ error: "Tracking is not active" });
-      return;
-    }
-    try {
-      state.tabPort.postMessage({ type: "run-calibration" });
-      sendResponse({ ok: true });
-    } catch (err) {
-      sendResponse({ error: "Failed to send calibration command: " + err.message });
-    }
     return;
   }
 

@@ -23,21 +23,26 @@
   let filteredVertical = 0;
   let hasFilteredGaze = false;
   let easyClickMode = false;
-  let calibrationModel = null;
-  let calibrationTargetEl = null;
-  let calibrationSession = null;
+  let scrollTimer = null;
+  let eyesClosedAt = 0;
+  let stillFrames = 0;
 
   // Settings (updated from popup via service worker)
-  let sensitivity = 2.0;
+  let sensitivity = 1.0;
   let smoothingFactor = 0.06;
   const BLINK_COOLDOWN_MS = 600;
+  const SCROLL_EDGE_PX = 60;
+  const SCROLL_SPEED = 4;
+  const LONG_BLINK_MS = 200;
   const MAX_DYNAMIC_SMOOTHING = 0.16;
   const SPEED_FOR_MAX_SMOOTHING_X = 220;
   const SPEED_FOR_MAX_SMOOTHING_Y = 180;
   const INPUT_GAZE_ALPHA = 0.12;
+  const STILLNESS_THRESHOLD = 1.5;
+  const STILLNESS_FRAMES = 4;
   const AXIS_X = {
     range: 0.32,
-    deadzone: 0.08,
+    deadzone: 0.15,
     responseExponent: 1.35,
     gain: 1.0,
     biasLearnRate: 0.015,
@@ -46,7 +51,7 @@
   };
   const AXIS_Y = {
     range: 0.22,
-    deadzone: 0.03,
+    deadzone: 0.07,
     responseExponent: 1.1,
     gain: 1.35,
     biasLearnRate: 0.006,
@@ -55,16 +60,6 @@
     minRange: 0.08,
     envelopeReturnRate: 0.0012
   };
-  const CALIBRATION_POINTS = [
-    { id: "tl", label: "Top Left", x: 0.08, y: 0.1 },
-    { id: "tr", label: "Top Right", x: 0.92, y: 0.1 },
-    { id: "bl", label: "Bottom Left", x: 0.08, y: 0.9 },
-    { id: "br", label: "Bottom Right", x: 0.92, y: 0.9 },
-    { id: "c", label: "Center", x: 0.5, y: 0.5 }
-  ];
-  const CALIBRATION_SETTLE_MS = 700;
-  const CALIBRATION_CAPTURE_MS = 1200;
-  const CALIBRATION_MIN_SAMPLES = 12;
 
   // ─── Cursor Overlay ───
 
@@ -77,16 +72,16 @@
       "position: fixed",
       "top: 0",
       "left: 0",
-      "width: 30px",
-      "height: 30px",
+      "width: 50px",
+      "height: 50px",
       "border-radius: 50%",
-      "background: rgba(59, 130, 246, 0.4)",
-      "border: 3px solid rgba(59, 130, 246, 0.9)",
+      "background: rgba(150, 150, 150, 0.4)",
+      "border: 3px solid rgba(150, 150, 150, 0.9)",
       "pointer-events: none",
       "z-index: 2147483647",
       "transform: translate(-50%, -50%)",
-      "box-shadow: 0 0 12px rgba(59, 130, 246, 0.5)",
-      "transition: background 0.15s, transform 0.15s"
+      "box-shadow: 0 0 12px rgba(150, 150, 150, 0.5)",
+      "transition: background 0.15s, border-color 0.15s, box-shadow 0.15s, transform 0.15s"
     ].join(";");
     document.documentElement.appendChild(cursorEl);
     moveCursor(smoothX, smoothY);
@@ -107,62 +102,6 @@
 
   function setEasyClickMode(enabled) {
     easyClickMode = !!enabled;
-    const styleId = "__eyes_only_easy_click_style__";
-    let styleEl = document.getElementById(styleId);
-
-    if (!easyClickMode) {
-      if (styleEl) styleEl.remove();
-      return;
-    }
-
-    if (!styleEl) {
-      styleEl = document.createElement("style");
-      styleEl.id = styleId;
-      document.documentElement.appendChild(styleEl);
-    }
-
-    styleEl.textContent = `
-      a, button, input, textarea, select, summary, [role="button"], [role="link"], [tabindex]:not([tabindex="-1"]) {
-        min-width: 56px !important;
-        min-height: 56px !important;
-        padding: 12px 16px !important;
-        font-size: max(1.05em, 16px) !important;
-        line-height: 1.35 !important;
-      }
-    `;
-  }
-
-  function createCalibrationTarget() {
-    if (calibrationTargetEl) return;
-    calibrationTargetEl = document.createElement("div");
-    calibrationTargetEl.id = "__eyes_only_calibration_target__";
-    calibrationTargetEl.style.cssText = [
-      "position: fixed",
-      "width: 22px",
-      "height: 22px",
-      "border-radius: 50%",
-      "border: 3px solid rgba(255, 255, 255, 0.95)",
-      "background: rgba(244, 67, 54, 0.9)",
-      "box-shadow: 0 0 0 8px rgba(244, 67, 54, 0.25), 0 0 18px rgba(0, 0, 0, 0.45)",
-      "transform: translate(-50%, -50%)",
-      "z-index: 2147483647",
-      "pointer-events: none"
-    ].join(";");
-    document.documentElement.appendChild(calibrationTargetEl);
-  }
-
-  function removeCalibrationTarget() {
-    if (calibrationTargetEl) {
-      calibrationTargetEl.remove();
-      calibrationTargetEl = null;
-    }
-  }
-
-  function positionCalibrationTarget(point, step, total) {
-    if (!calibrationTargetEl) return;
-    calibrationTargetEl.style.left = `${point.x * window.innerWidth}px`;
-    calibrationTargetEl.style.top = `${point.y * window.innerHeight}px`;
-    setStatusText(`Calibrating ${step}/${total}: ${point.label}`);
   }
 
   // ─── Status Badge ───
@@ -177,16 +116,16 @@
       "bottom: 12px",
       "right: 12px",
       "padding: 6px 14px",
-      "background: rgba(0, 0, 0, 0.8)",
-      "color: #4fc3f7",
+      "background: #fff",
+      "color: #F65009",
+      "border: 2px solid #F65009",
       "font-size: 12px",
       "font-family: system-ui, -apple-system, sans-serif",
       "border-radius: 20px",
       "z-index: 2147483647",
-      "pointer-events: none",
-      "backdrop-filter: blur(4px)"
+      "pointer-events: none"
     ].join(";");
-    statusEl.textContent = "Eyes Only: Starting...";
+    statusEl.textContent = "Sightline: Starting...";
     document.documentElement.appendChild(statusEl);
   }
 
@@ -198,7 +137,7 @@
   }
 
   function setStatusText(text) {
-    if (statusEl) statusEl.textContent = "Eyes Only: " + text;
+    if (statusEl) statusEl.textContent = "Sightline: " + text;
   }
 
   // ─── Gaze to Screen Mapping ───
@@ -219,15 +158,6 @@
     return Math.sign(v) * Math.pow(Math.abs(v), exponent);
   }
 
-  function lerp(a, b, t) {
-    return a + (b - a) * t;
-  }
-
-  function inverseLerp(a, b, v) {
-    const d = b - a;
-    if (Math.abs(d) < 1e-6) return 0.5;
-    return (v - a) / d;
-  }
 
   function learnBias(horizontal, vertical) {
     // Learn neutral gaze center only when gaze is near center to avoid drift.
@@ -289,46 +219,10 @@
     return { horizontal: filteredHorizontal, vertical: filteredVertical };
   }
 
-  function projectWithModel(horizontal, vertical, model) {
-    const { tl, tr, bl, br, offsetX, offsetY } = model;
-
-    const xTop = inverseLerp(tl.h, tr.h, horizontal);
-    const xBottom = inverseLerp(bl.h, br.h, horizontal);
-    const yLeft = inverseLerp(tl.v, bl.v, vertical);
-    const yRight = inverseLerp(tr.v, br.v, vertical);
-
-    const coarseX = clamp((xTop + xBottom) * 0.5, 0, 1);
-    const coarseY = clamp((yLeft + yRight) * 0.5, 0, 1);
-
-    const hMinAtY = lerp(tl.h, bl.h, coarseY);
-    const hMaxAtY = lerp(tr.h, br.h, coarseY);
-    const refinedX = clamp(inverseLerp(hMinAtY, hMaxAtY, horizontal), 0, 1);
-
-    const vTopAtX = lerp(tl.v, tr.v, coarseX);
-    const vBottomAtX = lerp(bl.v, br.v, coarseX);
-    const refinedY = clamp(inverseLerp(vTopAtX, vBottomAtX, vertical), 0, 1);
-
-    const x = clamp(((coarseX + refinedX) * 0.5) + offsetX, 0, 1);
-    const y = clamp(((coarseY + refinedY) * 0.5) + offsetY, 0, 1);
-
-    return {
-      mappedX: x * 2 - 1,
-      mappedY: y * 2 - 1
-    };
-  }
-
-  function mapWithCalibration(horizontal, vertical) {
-    if (!calibrationModel) return null;
-    return projectWithModel(horizontal, vertical, calibrationModel);
-  }
-
   function updateGaze(horizontal, vertical) {
-    const calibrated = mapWithCalibration(horizontal, vertical);
-    const mappedX = calibrated ? calibrated.mappedX : mapAxis(horizontal, biasX, AXIS_X);
-    if (!calibrated) {
-      updateVerticalEnvelope(vertical);
-    }
-    const mappedY = calibrated ? calibrated.mappedY : mapVerticalAxis(vertical);
+    const mappedX = mapAxis(horizontal, biasX, AXIS_X);
+    updateVerticalEnvelope(vertical);
+    const mappedY = mapVerticalAxis(vertical);
 
     const rawX = (0.5 + mappedX * 0.5 * sensitivity) * window.innerWidth;
     const rawY = (0.5 + mappedY * 0.5 * sensitivity) * window.innerHeight;
@@ -353,12 +247,98 @@
       MAX_DYNAMIC_SMOOTHING
     );
 
+    // Stillness lock: if cursor barely moves for several frames, freeze it.
+    if (Math.abs(dx) < STILLNESS_THRESHOLD && Math.abs(dy) < STILLNESS_THRESHOLD) {
+      stillFrames++;
+    } else {
+      stillFrames = 0;
+    }
+
+    if (stillFrames >= STILLNESS_FRAMES) return;
+
     smoothX += dx * alphaX;
     smoothY += dy * alphaY;
 
     cursorX = smoothX;
     cursorY = smoothY;
     moveCursor(cursorX, cursorY);
+    updateEdgeScroll();
+  }
+
+  // ─── Edge Scrolling ───
+
+  let scrollDx = 0;
+  let scrollDy = 0;
+  let scrollTarget = null;
+  let lastScrollTarget = null;
+
+  function findScrollableAncestor(el) {
+    let current = el;
+    while (current && current !== document.documentElement) {
+      const style = window.getComputedStyle(current);
+      const overflowY = style.overflowY;
+      const overflowX = style.overflowX;
+      const canScrollY = (overflowY === "auto" || overflowY === "scroll") &&
+        current.scrollHeight > current.clientHeight;
+      const canScrollX = (overflowX === "auto" || overflowX === "scroll") &&
+        current.scrollWidth > current.clientWidth;
+      if (canScrollY || canScrollX) return current;
+      current = current.parentElement;
+    }
+    return null;
+  }
+
+  function updateEdgeScroll() {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+
+    scrollDx = 0;
+    scrollDy = 0;
+
+    if (cursorY < SCROLL_EDGE_PX) {
+      scrollDy = -SCROLL_SPEED * (1 - cursorY / SCROLL_EDGE_PX);
+    } else if (cursorY > h - SCROLL_EDGE_PX) {
+      scrollDy = SCROLL_SPEED * (1 - (h - cursorY) / SCROLL_EDGE_PX);
+    }
+
+    if (cursorX < SCROLL_EDGE_PX) {
+      scrollDx = -SCROLL_SPEED * (1 - cursorX / SCROLL_EDGE_PX);
+    } else if (cursorX > w - SCROLL_EDGE_PX) {
+      scrollDx = SCROLL_SPEED * (1 - (w - cursorX) / SCROLL_EDGE_PX);
+    }
+
+    if (scrollDx !== 0 || scrollDy !== 0) {
+      // Find the scrollable element under the cursor.
+      // Cache the last valid target so edge positions that return null
+      // (e.g. cursor at very top) still scroll the right container.
+      const elUnder = document.elementFromPoint(cursorX, cursorY);
+      const found = elUnder ? findScrollableAncestor(elUnder) : null;
+      if (found) {
+        scrollTarget = found;
+        lastScrollTarget = found;
+      } else {
+        scrollTarget = lastScrollTarget;
+      }
+
+      if (!scrollTimer) {
+        scrollTimer = setInterval(() => {
+          if (scrollTarget) {
+            scrollTarget.scrollBy(scrollDx, scrollDy);
+          } else {
+            window.scrollBy(scrollDx, scrollDy);
+          }
+        }, 16);
+      }
+    } else {
+      stopEdgeScroll();
+    }
+  }
+
+  function stopEdgeScroll() {
+    if (scrollTimer) {
+      clearInterval(scrollTimer);
+      scrollTimer = null;
+    }
   }
 
   // ─── Click Targeting ───
@@ -366,7 +346,7 @@
   // directly under the cursor is not interactive.
 
   const CLICKABLE_TAGS = new Set([
-    "A", "BUTTON", "INPUT", "TEXTAREA", "SELECT", "SUMMARY", "DETAILS"
+    "A", "BUTTON", "INPUT", "TEXTAREA", "SELECT", "SUMMARY", "DETAILS", "IFRAME"
   ]);
 
   const CLICKABLE_ROLES = new Set([
@@ -442,7 +422,14 @@
 
     el.dispatchEvent(new MouseEvent("mousedown", eventInit));
     el.dispatchEvent(new MouseEvent("mouseup", eventInit));
-    el.dispatchEvent(new MouseEvent("click", eventInit));
+
+    // If the element is inside a link, click the link so navigation fires.
+    const anchor = el.closest("a[href]");
+    const clickTarget = anchor || el;
+
+    if (typeof clickTarget.click === "function") {
+      try { clickTarget.click(); } catch {}
+    }
   }
 
   // ─── Blink Click Handler ───
@@ -454,11 +441,15 @@
 
     // Visual feedback: pulse the cursor green
     if (cursorEl) {
-      cursorEl.style.background = "rgba(76, 175, 80, 0.7)";
+      cursorEl.style.background = "rgba(246, 80, 9, 0.7)";
+      cursorEl.style.borderColor = "rgba(246, 80, 9, 0.9)";
+      cursorEl.style.boxShadow = "0 0 12px rgba(246, 80, 9, 0.5)";
       cursorEl.style.transform = "translate(-50%, -50%) scale(1.5)";
       setTimeout(() => {
         if (cursorEl) {
-          cursorEl.style.background = "rgba(59, 130, 246, 0.4)";
+          cursorEl.style.background = "rgba(150, 150, 150, 0.4)";
+          cursorEl.style.borderColor = "rgba(150, 150, 150, 0.9)";
+          cursorEl.style.boxShadow = "0 0 12px rgba(150, 150, 150, 0.5)";
           cursorEl.style.transform = "translate(-50%, -50%) scale(1)";
         }
       }, 200);
@@ -483,108 +474,6 @@
     setTimeout(() => {
       if (isActive) setStatusText("Tracking");
     }, 800);
-  }
-
-  function robustPointAverage(samples) {
-    if (!samples || samples.length === 0) return null;
-
-    const take = (key) => {
-      const sorted = samples.map((s) => s[key]).sort((a, b) => a - b);
-      const trim = Math.floor(sorted.length * 0.2);
-      const kept = sorted.slice(trim, sorted.length - trim);
-      const values = kept.length ? kept : sorted;
-      const sum = values.reduce((acc, v) => acc + v, 0);
-      return sum / values.length;
-    };
-
-    return { h: take("h"), v: take("v") };
-  }
-
-  function buildCalibrationModel(results) {
-    const tl = results.tl;
-    const tr = results.tr;
-    const bl = results.bl;
-    const br = results.br;
-    const c = results.c;
-    if (!tl || !tr || !bl || !br || !c) return null;
-
-    const cornerOnly = { tl, tr, bl, br, offsetX: 0, offsetY: 0 };
-    const centerMapped = projectWithModel(c.h, c.v, cornerOnly);
-    const centerX = centerMapped ? (centerMapped.mappedX + 1) * 0.5 : 0.5;
-    const centerY = centerMapped ? (centerMapped.mappedY + 1) * 0.5 : 0.5;
-
-    return {
-      tl,
-      tr,
-      bl,
-      br,
-      offsetX: clamp(0.5 - centerX, -0.2, 0.2),
-      offsetY: clamp(0.5 - centerY, -0.2, 0.2)
-    };
-  }
-
-  function wait(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  async function runCalibration() {
-    if (!isActive) {
-      setStatusText("Start tracking first");
-      return;
-    }
-    if (calibrationSession?.running) return;
-
-    calibrationSession = {
-      running: true,
-      collecting: false,
-      samples: [],
-      results: {}
-    };
-
-    createCalibrationTarget();
-    try {
-      for (let i = 0; i < CALIBRATION_POINTS.length; i++) {
-        if (!calibrationSession.running) throw new Error("Calibration cancelled");
-        const point = CALIBRATION_POINTS[i];
-        positionCalibrationTarget(point, i + 1, CALIBRATION_POINTS.length);
-        await wait(CALIBRATION_SETTLE_MS);
-
-        calibrationSession.samples = [];
-        calibrationSession.collecting = true;
-        await wait(CALIBRATION_CAPTURE_MS);
-        calibrationSession.collecting = false;
-
-        const avg = robustPointAverage(calibrationSession.samples);
-        if (!avg || calibrationSession.samples.length < CALIBRATION_MIN_SAMPLES) {
-          throw new Error(`Not enough stable samples at ${point.label}`);
-        }
-        calibrationSession.results[point.id] = avg;
-      }
-
-      const model = buildCalibrationModel(calibrationSession.results);
-      if (!model) {
-        throw new Error("Calibration model build failed");
-      }
-      calibrationModel = model;
-      setStatusText("5-point calibration complete");
-      setTimeout(() => {
-        if (isActive && !(calibrationSession && calibrationSession.running)) {
-          setStatusText("Tracking");
-        }
-      }, 1200);
-    } catch (err) {
-      setStatusText(`Calibration failed: ${err.message}`);
-      setTimeout(() => {
-        if (isActive) setStatusText("Tracking");
-      }, 1500);
-    } finally {
-      if (calibrationSession) {
-        calibrationSession.running = false;
-        calibrationSession.collecting = false;
-      }
-      calibrationSession = null;
-      removeCalibrationTarget();
-    }
   }
 
   // ─── Start / Stop ───
@@ -619,14 +508,22 @@
 
   function stopOverlay() {
     isActive = false;
-    calibrationSession = null;
+    stopEdgeScroll();
     removeCursor();
-    removeCalibrationTarget();
     removeStatusBadge();
     setEasyClickMode(false);
   }
 
   // ─── Message Handling ───
+
+  // Prevent bfcache from killing the extension port when navigating back.
+  window.addEventListener("pageshow", (e) => {
+    if (e.persisted) {
+      // Page was restored from bfcache — the old port is dead.
+      // Clean up so the service worker can reconnect.
+      stopOverlay();
+    }
+  });
 
   // Ping handler for connectivity check (uses one-shot messages)
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -663,10 +560,6 @@
           setEasyClickMode(!!msg.enabled);
           break;
 
-        case "run-calibration":
-          runCalibration();
-          break;
-
         case "calibrate-center":
           // Backward-compatible quick center calibration.
           calibrateCenter();
@@ -684,27 +577,31 @@
             break;
           }
 
-          if (!(calibrationSession && calibrationSession.running)) {
-            setStatusText("Tracking");
-          }
+          setStatusText("Tracking");
           lastHorizontal = msg.horizontal;
           lastVertical = msg.vertical;
 
-          if (calibrationSession && calibrationSession.collecting && !msg.eyesClosed) {
-            calibrationSession.samples.push({ h: msg.horizontal, v: msg.vertical });
+          // Track when eyes close to distinguish intentional long blinks from normal ones.
+          if (msg.eyesClosed && eyesClosedAt === 0) {
+            eyesClosedAt = Date.now();
           }
 
           // Keep cursor stable while eyes are closed to avoid blink-induced jumps.
           if (!msg.eyesClosed) {
             const filtered = smoothGazeInput(msg.horizontal, msg.vertical);
-            if (!calibrationModel) {
-              learnBias(filtered.horizontal, filtered.vertical);
-            }
+            learnBias(filtered.horizontal, filtered.vertical);
             updateGaze(filtered.horizontal, filtered.vertical);
           }
 
-          if (msg.blink && !(calibrationSession && calibrationSession.running)) {
-            handleBlink();
+          if (msg.blink) {
+            const closedDuration = eyesClosedAt > 0 ? Date.now() - eyesClosedAt : 0;
+            eyesClosedAt = 0;
+            if (closedDuration >= LONG_BLINK_MS) {
+              handleBlink();
+            }
+          }
+          if (!msg.eyesClosed) {
+            eyesClosedAt = 0;
           }
           break;
       }
