@@ -1,4 +1,4 @@
-# Sightline - Eye Tracking Web Navigation
+# Sightline.ai - Eye Tracking Web Navigation
 
 A Chrome extension that lets you control the browser with your eyes. Gaze moves a visible cursor overlay, blinking triggers a click.
 
